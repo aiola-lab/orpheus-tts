@@ -1,11 +1,12 @@
 import asyncio
 import torch
 import os
+import uuid
 from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
 from transformers import AutoTokenizer
 import threading
 import queue
-from .decoder import tokens_decoder_sync
+from .decoder import tokens_decoder_sync, tokens_decoder
 
 class OrpheusModel:
     def __init__(self, model_name, dtype=torch.bfloat16, tokenizer='canopylabs/orpheus-3b-0.1-pretrained', **engine_kwargs):
@@ -130,5 +131,38 @@ class OrpheusModel:
     
     def generate_speech(self, **kwargs):
         return tokens_decoder_sync(self.generate_tokens_sync(**kwargs))
+
+    async def generate_tokens_async(
+            self, prompt, voice=None, request_id=None,
+            temperature=0.5, top_p=0.5, max_tokens=1024,
+            stop_token_ids=[49158], repetition_penalty=1.05
+    ):
+        if request_id is None:
+            request_id = f"req-{uuid.uuid4()}"
+        prompt_string = self._format_prompt(prompt, voice)
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            stop_token_ids=stop_token_ids,
+            repetition_penalty=repetition_penalty,
+        )
+
+        prev = ""
+        async for result in self.engine.generate(
+                prompt=prompt_string,
+                sampling_params=sampling_params,
+                request_id=request_id,
+        ):
+            full = result.outputs[0].text  # cumulative
+            delta = full[len(prev):]
+            if delta:
+                yield delta
+                prev = full
+
+    async def generate_speech_async(self, **kwargs):
+        # tokens_decoder is YOUR async decoder from the snippet
+        async for audio_bytes in tokens_decoder(self.generate_tokens_async(**kwargs)):
+            yield audio_bytes  # PCM16 bytes from SNAC
 
 
